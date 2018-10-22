@@ -21,6 +21,11 @@
 #import "XADWARCParser.h"
 #import "Scanning.h"
 
+#import "XADGzipParser.h"
+#import "XADDeflateHandle.h"
+#import "CSBzip2Handle.h"
+#import "XADCompressHandle.h"
+
 @implementation XADWARCParser
 
 +(int)requiredHeaderSize { return 10; }
@@ -332,10 +337,61 @@
 	}
 }
 
+-(NSArray *)getContentEncodings:(NSArray *)headers
+{
+	NSError *err=nil;
+	NSRegularExpression *re=[NSRegularExpression regularExpressionWithPattern:@"^content-encoding:[	 ]*" options:NSRegularExpressionCaseInsensitive error:&err];
+	NSMutableArray *encodings=[NSMutableArray array];
+	NSEnumerator *enumerator=[headers objectEnumerator];
+	NSString *h;
+	NSAssert1(err==nil, @"%@", err);
+	while((h=[enumerator nextObject]))
+	{
+		NSTextCheckingResult *r=[re firstMatchInString:h options:0 range:NSMakeRange(0, h.length)];
+		if(r==nil) continue;
+
+		h = [h substringWithRange:NSMakeRange(r.range.length, h.length-r.range.length)];
+		NSArray *hencodings=[h componentsSeparatedByString:@","];
+		NSEnumerator *henumerator=[hencodings objectEnumerator];
+		NSString *enc;
+		while((enc=[henumerator nextObject]))
+			[encodings addObject:[enc stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]];
+	}
+
+	return encodings;
+}
 
 -(CSHandle *)handleForEntryWithDictionary:(NSDictionary *)dict wantChecksum:(BOOL)checksum
 {
-	return [self handleAtDataOffsetForDictionary:dict];
+	CSHandle *handle=[self handleAtDataOffsetForDictionary:dict];
+
+	NSArray *encodings=[self getContentEncodings:[dict objectForKey:@"WARCResponseHeaders"]];
+	NSEnumerator *enumerator=[encodings reverseObjectEnumerator];
+	NSString *enc;
+	while((enc=[enumerator nextObject]))
+	{
+		// https://www.iana.org/assignments/http-parameters/http-parameters.xhtml#content-coding
+		// TODO: implement more encodings
+		// FIXME: if the response is compressed, the size listed by unar/lsar is wrong
+		//        since it refers to the size of the compressed response
+		// compress is untested, I couldn't find a server to test it with.
+		if([enc caseInsensitiveCompare:@"gzip"]==NSOrderedSame||
+		[enc caseInsensitiveCompare:@"x-gzip"]==NSOrderedSame)
+			handle=[[[XADGzipHandle alloc] initWithHandle:handle] autorelease];
+		else if([enc caseInsensitiveCompare:@"deflate"]==NSOrderedSame)
+			handle=[[[XADDeflateHandle alloc] initWithHandle:handle length:[handle fileSize]] autorelease];
+		else if([enc caseInsensitiveCompare:@"identity"]==NSOrderedSame)
+			; // No compression
+		else if([enc caseInsensitiveCompare:@"bzip2"]==NSOrderedSame)
+			handle=[[[CSBzip2Handle alloc] initWithHandle:handle length:[handle fileSize]] autorelease];
+		else if([enc caseInsensitiveCompare:@"compress"]==NSOrderedSame||
+		[enc caseInsensitiveCompare:@"x-compress"]==NSOrderedSame)
+			handle=[[[XADCompressHandle alloc] initWithHandle:handle flags:0] autorelease];
+		else
+			NSLog(@"Unimplemented content-encoding: %@", enc);
+	}
+
+	return handle;
 }
 
 -(NSString *)formatName { return @"WARC"; }
