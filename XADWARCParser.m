@@ -21,6 +21,7 @@
 #import "XADWARCParser.h"
 #import "Scanning.h"
 
+#import "XADHTTPChunkedHandle.h"
 #import "XADGzipParser.h"
 #import "XADDeflateHandle.h"
 #import "CSBzip2Handle.h"
@@ -337,10 +338,10 @@
 	}
 }
 
--(NSArray *)getContentEncodings:(NSArray *)headers
+-(NSArray *)getHeaderValues:(NSArray *)headers key:(NSString *)key
 {
 	NSError *err=nil;
-	NSRegularExpression *re=[NSRegularExpression regularExpressionWithPattern:@"^content-encoding:[	 ]*" options:NSRegularExpressionCaseInsensitive error:&err];
+	NSRegularExpression *re=[NSRegularExpression regularExpressionWithPattern:[NSString stringWithFormat:@"^%@:[	 ]*", key] options:NSRegularExpressionCaseInsensitive error:&err];
 	NSMutableArray *encodings=[NSMutableArray array];
 	NSEnumerator *enumerator=[headers objectEnumerator];
 	NSString *h;
@@ -365,16 +366,40 @@
 {
 	CSHandle *handle=[self handleAtDataOffsetForDictionary:dict];
 
-	NSArray *encodings=[self getContentEncodings:[dict objectForKey:@"WARCResponseHeaders"]];
-	NSEnumerator *enumerator=[encodings reverseObjectEnumerator];
+	// TODO: implement more encodings
+	// FIXME: if the response is encoded, the size listed by unar/lsar is wrong
+	//        since it doesn't refer to the size of the decoded response
+	// compress is untested, I couldn't find a server to test it with.
 	NSString *enc;
+	NSArray *encodings=[self getHeaderValues:[dict objectForKey:@"WARCResponseHeaders"] key:@"transfer-encoding"];
+	NSEnumerator *enumerator=[encodings reverseObjectEnumerator];
+	while((enc=[enumerator nextObject]))
+	{
+		// https://www.iana.org/assignments/http-parameters/http-parameters.xhtml#transfer-coding
+		if([enc caseInsensitiveCompare:@"chunked"]==NSOrderedSame)
+			handle=[[[XADHTTPChunkedHandle alloc] initWithHandle:handle] autorelease];
+		else if([enc caseInsensitiveCompare:@"gzip"]==NSOrderedSame||
+		[enc caseInsensitiveCompare:@"x-gzip"]==NSOrderedSame)
+			handle=[[[XADGzipHandle alloc] initWithHandle:handle] autorelease];
+		else if([enc caseInsensitiveCompare:@"deflate"]==NSOrderedSame)
+			handle=[[[XADDeflateHandle alloc] initWithHandle:handle length:[handle fileSize]] autorelease];
+		else if([enc caseInsensitiveCompare:@"identity"]==NSOrderedSame)
+			; // No compression
+		else if([enc caseInsensitiveCompare:@"bzip2"]==NSOrderedSame)
+			handle=[[[CSBzip2Handle alloc] initWithHandle:handle length:[handle fileSize]] autorelease];
+		else if([enc caseInsensitiveCompare:@"compress"]==NSOrderedSame||
+		[enc caseInsensitiveCompare:@"x-compress"]==NSOrderedSame)
+			handle=[[[XADCompressHandle alloc] initWithHandle:handle flags:0] autorelease];
+		else
+			NSLog(@"Unimplemented transfer-encoding: %@", enc);
+
+	}
+
+	encodings=[self getHeaderValues:[dict objectForKey:@"WARCResponseHeaders"] key:@"content-encoding"];
+	enumerator=[encodings reverseObjectEnumerator];
 	while((enc=[enumerator nextObject]))
 	{
 		// https://www.iana.org/assignments/http-parameters/http-parameters.xhtml#content-coding
-		// TODO: implement more encodings
-		// FIXME: if the response is compressed, the size listed by unar/lsar is wrong
-		//        since it refers to the size of the compressed response
-		// compress is untested, I couldn't find a server to test it with.
 		if([enc caseInsensitiveCompare:@"gzip"]==NSOrderedSame||
 		[enc caseInsensitiveCompare:@"x-gzip"]==NSOrderedSame)
 			handle=[[[XADGzipHandle alloc] initWithHandle:handle] autorelease];
